@@ -3,60 +3,53 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
-	"reflect"
+	"os"
 
 	"github.com/Huawei-APAC-Professional-Services/config-rules/event"
 	"github.com/Huawei-APAC-Professional-Services/config-rules/service"
+	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth/global"
 	huaweicontext "huaweicloud.com/go-runtime/go-api/context"
 	huaweiruntime "huaweicloud.com/go-runtime/pkg/runtime"
 )
+
+var configClient *service.ConfigClient
 
 const (
 	CheckOnlyOneEnterpriseAdministrator string = "one_enterprise_administrator"
 )
 
-var iamService *service.ConfigIAMClient
-
-func handler(payload []byte, ctx huaweicontext.RuntimeContext) error {
+func handler(payload []byte, ctx huaweicontext.RuntimeContext) (interface{}, error) {
 	var et event.ConfigEvent
+	var region string
 	err := json.Unmarshal(payload, &et)
 	if err != nil {
-		slog.Error(err.Error())
-		return err
+		return nil, err
 	}
-	slog.Info(string(payload))
 	ak := ctx.GetAccessKey()
 	sk := ctx.GetSecretKey()
-	token := ctx.GetToken()
-	region := et.InvokingEvent.RegionId
-	switch provider := et.InvokingEvent.Provider; provider {
-	case "iam":
-		iamService = service.NewIAMClient(ak, sk, region)
-	default:
-		fmt.Println("test")
+	domainId := et.DomainId
+	if *et.TriggerType == "period" {
+		region = os.Getenv("region")
+	} else {
+		region = *et.InvokingEvent.RegionId
 	}
-	switch ruletype := et.RuleParameter["rule"].(type) {
-	case string:
-		fmt.Printf("String: %v\n", ruletype)
-	default:
-		fmt.Printf("Yes: %v\n", reflect.TypeOf(ruletype))
-	}
-	switch rule := et.RuleParameter["rule"].(string); rule {
+	globalAuth := global.NewCredentialsBuilder().WithAk(ak).WithSk(sk).WithDomainId(*domainId).Build()
+	configClient = service.NewConfigClient(globalAuth, region)
+	switch rule := et.RuleParameter["rule"]["value"]; rule {
 	case CheckOnlyOneEnterpriseAdministrator:
-		result, err := iamService.HasOnlyOneEnterpriseAdministrator()
+		result, err := configClient.EnsureHasOnlyOneEnterpriseAdministratorPeriodCheck(&et, region)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if result {
-			return et.ReportComplianceStatus(event.CompliantResult, token)
-		} else {
-			return et.ReportComplianceStatus(event.NonCompliantResult, token)
+		err = result.UpdatePolicyState(ctx.GetToken())
+		if err != nil {
+			return nil, err
 		}
+		return "ok", nil
 	default:
 		slog.Error("unkonw customized rule")
-		return errors.New("unknow customized rule")
+		return nil, errors.New("unknow customized rule")
 	}
 }
 
